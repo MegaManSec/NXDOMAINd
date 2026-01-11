@@ -367,24 +367,41 @@ async function persistSelective() {
       }
     }
     if (dirty.domainStatus) {
-      // materialize maps to arrays before persisting
+      // Materialize maps to arrays before persisting, then STRIP maps.
+      const persisted: Record<string, DomainInfo> = {};
       for (const [k, ds] of domainStatusMem) {
-        if (ds.pagesMap) {
-          ds.pages = Array.from(ds.pagesMap.entries())
-            .map(([url, ts]) => ({ url, ts }))
-            .sort((a, b) => b.ts - a.ts)
-            .slice(0, MAX_PAGES_PER_DOMAIN);
+        const pages =
+          ds.pagesMap instanceof Map
+            ? Array.from(ds.pagesMap.entries())
+                .map(([url, ts]) => ({ url, ts }))
+                .sort((a, b) => b.ts - a.ts)
+                .slice(0, MAX_PAGES_PER_DOMAIN)
+            : ds.pages;
+
+        const requests =
+          ds.requestsMap instanceof Map
+            ? Array.from(ds.requestsMap.entries())
+                .map(([url, ts]) => ({ url, ts }))
+                .sort((a, b) => b.ts - a.ts)
+                .slice(0, MAX_REQS_PER_DOMAIN)
+            : ds.requests;
+
+        // Remove maps from persisted form (chrome.storage does not round-trip Map)
+        const clean: DomainInfo = { ...(ds as any) };
+        delete (clean as any).pagesMap;
+        delete (clean as any).requestsMap;
+        if (pages) {
+          clean.pages = pages;
         }
-        if (ds.requestsMap) {
-          ds.requests = Array.from(ds.requestsMap.entries())
-            .map(([url, ts]) => ({ url, ts }))
-            .sort((a, b) => b.ts - a.ts)
-            .slice(0, MAX_REQS_PER_DOMAIN);
+        if (requests) {
+          clean.requests = requests;
         }
-        // keep object mirror in sync
-        domainStatus[k] = ds;
+
+        persisted[k] = clean;
+        // keep object mirror in sync (also map-free)
+        domainStatus[k] = clean;
       }
-      payload.domainStatus = domainStatus;
+      payload.domainStatus = persisted;
     }
     if (dirty.availableList) {
       payload.availableList = availableList;
@@ -1235,7 +1252,9 @@ function addPageContext(domain: string, pageUrl?: string | null) {
       requests: [],
     };
     const t = Date.now();
-    item.pagesMap ??= new Map<string, number>();
+    if (!(item.pagesMap instanceof Map)) {
+      item.pagesMap = new Map<string, number>();
+    }
     item.pagesMap.set(pageUrl, t);
     trimMapByMostRecent(item.pagesMap);
     item.ts = t;
@@ -1273,7 +1292,9 @@ function addRequestContext(domain: string, reqUrl?: string | null) {
       requests: [],
     };
     const t = Date.now();
-    item.requestsMap ??= new Map<string, number>();
+    if (!(item.requestsMap instanceof Map)) {
+      item.requestsMap = new Map<string, number>();
+    }
     item.requestsMap.set(reqUrl, t);
     trimMapByMostRecent(item.requestsMap);
     item.ts = t;
@@ -2040,6 +2061,16 @@ async function init() {
   ]);
   hostSeen = s.hostSeen || {};
   domainStatus = s.domainStatus || {};
+
+  // chrome.storage does not restore Map instances; ensure no persisted map-like junk remains
+  try {
+    for (const ds of Object.values(domainStatus)) {
+      if (ds && typeof ds === 'object') {
+        delete (ds as any).pagesMap;
+        delete (ds as any).requestsMap;
+      }
+    }
+  } catch {}
   Object.entries(hostSeen)
     .sort((a, b) => (a[1] ?? 0) - (b[1] ?? 0))
     .forEach(([k, v]) => hostSeenMem.set(k, v));
