@@ -1,0 +1,11 @@
+{
+  "categories": {
+    "firefox": ["privacy-security", "web-development"]
+  },
+  "summary": {
+    "en-US": "Discover requests sent to unregistered domains."
+  },
+  "version": {
+    "license": "GPL-3.0-only"
+  }
+}

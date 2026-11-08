@@ -53,13 +53,13 @@ jobs:
         run: pnpm run build:firefox
 
       # ---------- Sign Firefox ----------
-      - name: Sign Firefox XPI (unlisted / self-distributed)
+      - name: Submit Firefox version to addons.mozilla.org
         if: startsWith(github.ref, 'refs/tags/')
         env:
           WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
           WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
         run: |
-          pnpm run sign:firefox
+          pnpm run package:source && pnpm run sign:firefox
 
       # ---------- Upload CI artifacts (ephemeral) ----------
       - name: Upload Chrome artifact
@@ -71,15 +71,6 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload Firefox artifact
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: nxdomain-watcher-firefox-${{ github.ref_name }}-${{ github.sha }}
-          path: artifacts/firefox/*.xpi
-          if-no-files-found: error
-          retention-days: 14
-
       # ---------- Publish permanent assets on tag ----------
       - name: Upload to GitHub Release (on tags)
         if: startsWith(github.ref, 'refs/tags/')
@@ -87,6 +78,5 @@ jobs:
         with:
           files: |
             artifacts/chrome/*.zip
-            artifacts/firefox/*.xpi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
