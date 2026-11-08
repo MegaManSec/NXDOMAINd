@@ -357,14 +357,10 @@
         function syncOpenBatch(batch) {
           const handles = [];
           for (const url of batch) {
-            // Open a blank tab synchronously, then navigate it — tends to be treated as a single gesture
             const w = window.open(url, '_blank', '');
             if (w && typeof w === 'object') {
               try {
                 w.opener = null;
-              } catch {}
-              try {
-                w.location.href = url;
               } catch {}
               handles.push(w);
               state.openedCount++;
@@ -503,7 +499,7 @@
 
         els.nextBatch.addEventListener('click', async () => {
           if (!state.running) {
-            rebuildBatches();
+            if (state.batchIndex >= state.batches.length) rebuildBatches();
             if (!state.batches.length) return;
             const dwellMs = (Number(els.dwellSeconds.value) || 10) * 1000;
             const batch = state.batches[state.batchIndex] || [];
@@ -562,7 +558,7 @@
 
         // Recompute batches when size changes (for accurate preview of counts)
         els.batchSize.addEventListener('change', rebuildBatches);
-        els.urls.addEventListener('blur', rebuildBatches);
+        els.urls.addEventListener('change', rebuildBatches);
 
         // Initial stats
         setStats();

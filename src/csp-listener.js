@@ -3,12 +3,14 @@
     'securitypolicyviolation',
     (e) => {
       try {
-        const blocked = e.blockedURI || '';
-        chrome.runtime.sendMessage({
-          type: 'cspViolation',
-          blockedURL: blocked,
-          documentURL: e.documentURI || location.href,
-        });
+        chrome.runtime.sendMessage(
+          {
+            type: 'cspViolation',
+            blockedURL: e.blockedURI || '',
+            documentURL: e.documentURI || location.href,
+          },
+          () => void chrome.runtime.lastError,
+        );
       } catch {}
     },
     true,

@@ -80,7 +80,11 @@ async function getSafeState() {
     );
     return {
       availableList: Array.isArray(s.availableList) ? s.availableList : [],
-      cacheSize: s.domainStatus ? Object.keys(s.domainStatus).length : 0,
+      cacheSize: s.domainStatus
+        ? Object.values(s.domainStatus).filter(
+            (d) => d && d.status !== 'pending' && d.status !== 'unknown',
+          ).length
+        : 0,
       hostsSeen: s.hostSeen ? Object.keys(s.hostSeen).length : 0,
     };
   } catch {
@@ -129,12 +133,9 @@ async function refresh() {
   const cc = document.getElementById('cache-count');
   const hc = document.getElementById('hosts-count');
 
-  setTextIfChanged(
-    ac,
-    String((Array.isArray(state.availableList) ? state.availableList : []).length),
-  );
-  setTextIfChanged(cc, String(typeof state.cacheSize === 'number' ? state.cacheSize : 0));
-  setTextIfChanged(hc, fmtNum(typeof state.hostsSeen === 'number' ? state.hostsSeen : 0));
+  setTextIfChanged(ac, String(availableList.length));
+  setTextIfChanged(cc, String(cacheSize));
+  setTextIfChanged(hc, fmtNum(hostsSeen));
 
   const ul = listEl;
   if (!ul) return;
@@ -202,7 +203,7 @@ async function refresh() {
         try {
           await chrome.runtime.sendMessage({ type: 'recheckDomain', domain: item.domain });
         } catch {}
-        scheduleRefresh(600);
+        scheduleRefresh();
       });
       actions.appendChild(recheck);
 
@@ -211,16 +212,7 @@ async function refresh() {
     });
 }
 
-// React to background messages telling us state changed
-try {
-  chrome.runtime.onMessage.addListener((msg) => {
-    if (msg && (msg.type === 'stateUpdated' || msg.type === 'availableListUpdated')) {
-      scheduleRefresh();
-    }
-  });
-} catch {}
-
-// React to storage updates (works even if you never send messages)
+// React to storage updates
 try {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && (changes.availableList || changes.hostSeen || changes.domainStatus)) {
@@ -238,13 +230,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   rIC(() => scheduleRefresh(800), { timeout: 800 });
 });
 
-document.getElementById('copy')?.addEventListener('click', async () => {
-  const state = await getSafeState();
-  const list = Array.isArray(state.availableList) ? state.availableList : [];
-  const text = list.map((x) => x.domain).join('\n');
+async function copyText(text, message) {
   try {
     await navigator.clipboard.writeText(text);
-    alert(`Copied ${list.length} domain(s).`);
   } catch {
     const ta = document.createElement('textarea');
     ta.value = text;
@@ -254,13 +242,18 @@ document.getElementById('copy')?.addEventListener('click', async () => {
     try {
       ta.select();
       document.execCommand('copy');
-      alert(`Copied ${list.length} domain(s).`);
     } finally {
-      try {
-        document.body.removeChild(ta);
-      } catch {}
+      ta.remove();
     }
   }
+  alert(message);
+}
+
+document.getElementById('copy')?.addEventListener('click', async () => {
+  const state = await getSafeState();
+  const list = Array.isArray(state.availableList) ? state.availableList : [];
+  const text = list.map((x) => x.domain).join('\n');
+  await copyText(text, `Copied ${list.length} domain(s).`);
 });
 
 document.getElementById('copy2')?.addEventListener('click', async () => {
@@ -284,26 +277,7 @@ document.getElementById('copy2')?.addEventListener('click', async () => {
       );
     }
   });
-  const text = lines.join('\n');
-  try {
-    await navigator.clipboard.writeText(text);
-    alert(`Copied ${lines.length} line(s).`);
-  } catch {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.top = '-1000px';
-    document.body.appendChild(ta);
-    try {
-      ta.select();
-      document.execCommand('copy');
-      alert(`Copied ${list.length} domain(s).`);
-    } finally {
-      try {
-        document.body.removeChild(ta);
-      } catch {}
-    }
-  }
+  await copyText(lines.join('\n'), `Copied ${lines.length} line(s).`);
 });
 
 document.getElementById('clear')?.addEventListener('click', async () => {

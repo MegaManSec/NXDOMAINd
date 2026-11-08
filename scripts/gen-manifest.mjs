@@ -8,6 +8,7 @@ if (!target) {
 }
 
 const root = process.cwd();
+const { version } = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const base = JSON.parse(fs.readFileSync(path.join(root, 'manifests/base.json'), 'utf8'));
 const patch = JSON.parse(
   fs.readFileSync(path.join(root, `manifests/${target}.patch.json`), 'utf8'),
@@ -23,7 +24,7 @@ function deepMerge(a, b) {
   return b === undefined ? a : b;
 }
 
-let manifest = deepMerge(base, patch);
+const manifest = deepMerge({ ...base, version }, patch);
 if (target === 'firefox' && manifest.action) {
   delete manifest.action;
 }
