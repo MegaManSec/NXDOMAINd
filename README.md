@@ -1,4 +1,11 @@
-# NXDOMAIN'd: Discover dangling unregistered domains while browsing the web
+# NXDOMAIN'd
+
+| Browser                                                                                                                               | Install from                                                                                        |
+| ------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| <img src="https://cdn.jsdelivr.net/gh/alrra/browser-logos@75.0.1/src/firefox/firefox_64x64.png" width="32" height="32" alt="Firefox"> | Firefox Add-ons (in review)                                                                         |
+| <img src="https://cdn.jsdelivr.net/gh/alrra/browser-logos@75.0.1/src/chrome/chrome_64x64.png" width="32" height="32" alt="Chrome">    | [GitHub Releases](../../releases/latest), loaded unpacked (see [Other downloads](#other-downloads)) |
+
+**Discover dangling unregistered domains while browsing the web.**
 
 Looking to perform a supply-chain attack? Look no further! This extension allows you to automatically discover websites which are loading resources from domains which you can register today!
 
@@ -16,11 +23,6 @@ Well, then this script may be for you!
 
 Note: don't do any of the above things if you care about the law, of course!
 
-The best part? One codebase, two builds!
-
-- **Chrome (MV3)**: service worker (ESM)
-- **Firefox (MV2)**: background script (IIFE)
-
 ## What it actually does
 
 - Monitors all network requests, and extracts all connected-to ICANN-only **domain** (using the [PSL](https://publicsuffix.org/) with [tldts](https://www.npmjs.com/package/tldts)).
@@ -31,55 +33,25 @@ The best part? One codebase, two builds!
 
 The idea is that there some websites attempting to load resources from external domains which no longer exist. You can register them, and take advantage of how the external resource is being loaded.
 
-## Download
+## Other downloads
 
-- Firefox: install it from [addons.mozilla.org](https://addons.mozilla.org/firefox/search/?q=NXDomain%27d). Releases also carry the Mozilla-signed `.xpi`, or an `.unsigned.xpi` if Mozilla hadn't signed it in time, which Firefox only installs in Developer Edition or Nightly.
-- Chrome: download the `.zip` from the [releases](https://github.com/MegaManSec/NXDOMAIND/releases) page, open [chrome://extensions/](chrome://extensions/), and drag the `.zip` file into your browser to import it.
+Releases also have these files:
 
-## Build
+- `nxdomain-watcher-firefox.xpi`, signed by Mozilla. Drag it into a Firefox window, or open `about:addons`, click the gear and choose Install Add-on From File. If a release only has `nxdomain-watcher-firefox.unsigned.xpi`, Mozilla hadn't signed it yet. Only Firefox Developer Edition and Nightly install that, after you set `xpinstall.signatures.required` to `false` in `about:config`.
+- `nxdomain-watcher-chrome.zip`. Unzip it, open `chrome://extensions`, turn on Developer mode, click Load unpacked and pick the unzipped folder.
 
-```bash
-pnpm install
-pnpm run build:chrome
-pnpm run build:firefox
-# or
-pnpm install
-pnpm run build
-```
+## Privacy
 
-- Chrome output: `dist/chrome`
-- Firefox output: `dist/firefox`
+NXDOMAIN'd has no accounts, analytics or tracking. To check whether a domain is registered, it sends just the domain name to public RDAP and DNS-over-HTTPS services. See [PRIVACY.md](PRIVACY.md).
 
-There's also
+## Issues
 
-```bash
-pnpm run typecheck
-pnpm run lint
-pnpm run fix
-```
+Report problems in [Issues](../../issues).
 
-### Load
+## Changelog
 
-- **Chrome**: `chrome://extensions` → Developer mode → Load unpacked → `dist/chrome`
-- **Firefox**: `about:debugging` → This Firefox → Load Temporary Add-on → `dist/firefox/manifest.json`
+See [Releases](../../releases).
 
-## Tuning
+## Development
 
-Edit `src/background.ts`:
-
-- `MAX_DOMAINS` – max registrable domains (eTLD+1) cached.
-- `MAX_HOSTS` – max full hosts (e.g., `a.cdn.example.com`) cached.
-- `MAX_PAGES_PER_DOMAIN` – cap for "Pages observed on” per domain (most recent kept).
-- `MAX_REQS_PER_DOMAIN` – cap for "Requests made to this domain” (most recent kept).
-- `REQ_GC_WINDOW_MS` – GC horizon for `seenRequestIds`/`lastQueued`.
-- `REQ_TTL_MS` – de-dupe window for repeated events with the same `requestId` and URL.
-- `MAX_CONCURRENCY` – parallel RDAP/DNS checks.
-- `ENQUEUE_TTL_MS` – per-domain re-enqueue throttle.
-- `TAB_HISTORY_TTL_MS` – keep per-tab full-URL history this long (to recover paths when only origin is provided).
-- `TAB_HISTORY_MAX` – max history entries per tab.
-- `MAX_LOGS` – max in-memory log lines (with recent-first trimming).
-- `LOG_TTL_MS` – drop logs older than this duration.
-
-## TODO
-
-Cleanup, and document proper tunings.
+Building, loading a local build and tuning are in [DEVELOPMENT.md](DEVELOPMENT.md).
