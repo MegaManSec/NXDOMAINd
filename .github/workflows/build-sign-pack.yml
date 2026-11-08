@@ -59,7 +59,12 @@ jobs:
           WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
           WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
         run: |
-          pnpm run package:source && pnpm run sign:firefox
+          set -o pipefail
+          pnpm run package:source
+          if ! pnpm run sign:firefox 2>&1 | tee "$RUNNER_TEMP/web-ext.log"; then
+            grep -q 'Approval: timeout exceeded' "$RUNNER_TEMP/web-ext.log" || exit 1
+            echo "::warning::Mozilla didn't sign it within 30 minutes, so the GitHub Release won't include the xpi."
+          fi
 
       # ---------- Upload CI artifacts (ephemeral) ----------
       - name: Upload Chrome artifact
@@ -78,5 +83,6 @@ jobs:
         with:
           files: |
             artifacts/chrome/*.zip
+            artifacts/firefox/*.xpi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
