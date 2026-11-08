@@ -45,7 +45,6 @@ function getPersistDelay() {
   return Math.floor(base + load * 20_000); // up to +20s under load
 }
 const HOSTSEEN_PERSIST_THROTTLE_MS = 2 * 60_000; // 2 minutes
-const HOSTSEEN_PERSIST_MIN_DELTA = 1_000; // only if many new hosts
 let lastHostSeenPersist = 0;
 let hostSeenNewSincePersist = 0;
 
@@ -77,8 +76,6 @@ const lastQueuedQueue: ExpireEntry[] = [];
 
 // MV3 (chrome.action) vs MV2 (browserAction) wrapper
 const act = chrome.action || (chrome as any).browserAction;
-
-const itemToHost = new Map<string, string>();
 
 // Keep object mirrors for compatibility, but use Maps for fast LRU & prune
 let hostSeen: Record<string, number> = {};
@@ -120,18 +117,14 @@ function dsDelete(k: string) {
   domainStatusMem.delete(k);
   delete domainStatus[k];
 }
-function hardDropDomain(registrable: string) {
-  const prev = dsGet(registrable);
-  if (prev && prev.status !== 'pending' && prev.status !== 'unknown') {
-    cacheResolvedCount = Math.max(0, cacheResolvedCount - 1);
-  }
-  dsDelete(registrable);
-  lastQueued.delete(registrable);
-  queued.delete(registrable);
-  active.delete(registrable);
-  inflightByDomain.delete(registrable);
-  itemToHost.delete(registrable);
-  dirty.domainStatus = true;
+function isResolved(ds: DomainInfo) {
+  return ds.status !== 'pending' && ds.status !== 'unknown';
+}
+function isSettledRegistered(ds?: DomainInfo): ds is DomainInfo {
+  return !!ds && ds.status === 'registered' && typeof ds.softUntil !== 'number';
+}
+function mapToRefs(m: Map<string, number> | undefined): PageRef[] {
+  return m instanceof Map ? Array.from(m, ([url, ts]) => ({ url, ts })) : [];
 }
 
 // Merge two PageRef lists by URL, keeping the latest ts, sorted desc, capped
@@ -178,15 +171,8 @@ function upsertAvailable(item: {
     availableList[i] = next;
   } else {
     if (availableList.length >= MAX_AVAILABLE) {
-      // evict oldest (index 0); consider LRU if you prefer
-      const drop = 0;
-      availableIdx.delete(availableList[drop]!.domain);
-      availableList.splice(drop, 1);
-      // reindex: cheap if small cap; for large caps, use an LRU queue
-      availableIdx.clear();
-      for (let j = 0; j < availableList.length; j++) {
-        availableIdx.set(availableList[j]!.domain, j);
-      }
+      // evict oldest (index 0)
+      removeAvailable(availableList[0]!.domain);
     }
     availableIdx.set(item.domain, availableList.length);
     // Avoid attaching explicit undefined with exactOptionalPropertyTypes
@@ -203,6 +189,21 @@ function upsertAvailable(item: {
   }
   dirty.availableList = true;
 }
+
+function removeAvailable(domain: string) {
+  const i = availableIdx.get(domain);
+  if (i == null) {
+    return false;
+  }
+  availableList.splice(i, 1);
+  availableIdx.delete(domain);
+  for (let j = i; j < availableList.length; j++) {
+    availableIdx.set(availableList[j]!.domain, j);
+  }
+  dirty.availableList = true;
+  return true;
+}
+
 class Deque<T> {
   private a: T[] = [];
   private head = 0;
@@ -233,6 +234,7 @@ const queue = new Deque<string>();
 const queued = new Set<string>();
 let inflight = 0;
 let hasNew = false;
+let initDone = false;
 let tabTopUrl: Record<number, string> = {};
 let debugEnabled = false;
 
@@ -336,10 +338,8 @@ const dirty = {
 };
 
 let persistTimer: number | null = null;
-let persistScheduled = false;
 let persistInFlight = false;
 let persistPending = false;
-let lastPersistRequestedAt = 0;
 
 type StopFn = () => void;
 const NOOP_STOP: StopFn = () => undefined;
@@ -355,75 +355,69 @@ async function persistSelective() {
   const stop = profTic('persistSelective');
   try {
     const payload: Record<string, unknown> = {};
-    if (dirty.hostSeen) {
-      const now = Date.now();
-      if (
-        now - lastHostSeenPersist >= HOSTSEEN_PERSIST_THROTTLE_MS &&
-        hostSeenNewSincePersist >= HOSTSEEN_PERSIST_MIN_DELTA
-      ) {
-        payload.hostSeen = hostSeen; // snapshot mirror
-        lastHostSeenPersist = now;
-        hostSeenNewSincePersist = 0;
-      }
+    const sent: (keyof typeof dirty)[] = [];
+    const now = Date.now();
+    const newHostsSent = hostSeenNewSincePersist;
+    if (
+      dirty.hostSeen &&
+      newHostsSent > 0 &&
+      now - lastHostSeenPersist >= HOSTSEEN_PERSIST_THROTTLE_MS
+    ) {
+      payload.hostSeen = hostSeen; // snapshot mirror
+      sent.push('hostSeen');
     }
     if (dirty.domainStatus) {
       // Materialize maps to arrays before persisting, then STRIP maps.
       const persisted: Record<string, DomainInfo> = {};
       for (const [k, ds] of domainStatusMem) {
-        const pages =
-          ds.pagesMap instanceof Map
-            ? Array.from(ds.pagesMap.entries())
-                .map(([url, ts]) => ({ url, ts }))
-                .sort((a, b) => b.ts - a.ts)
-                .slice(0, MAX_PAGES_PER_DOMAIN)
-            : ds.pages;
-
-        const requests =
-          ds.requestsMap instanceof Map
-            ? Array.from(ds.requestsMap.entries())
-                .map(([url, ts]) => ({ url, ts }))
-                .sort((a, b) => b.ts - a.ts)
-                .slice(0, MAX_REQS_PER_DOMAIN)
-            : ds.requests;
-
-        // Remove maps from persisted form (chrome.storage does not round-trip Map)
-        const clean: DomainInfo = { ...(ds as any) };
-        delete (clean as any).pagesMap;
-        delete (clean as any).requestsMap;
-        if (pages) {
-          clean.pages = pages;
-        }
-        if (requests) {
-          clean.requests = requests;
-        }
-
+        const { pagesMap, requestsMap, pages, requests, ...rest } = ds;
+        const clean: DomainInfo = isSettledRegistered(ds)
+          ? rest
+          : {
+              ...rest,
+              pages: mergeRefs(pages, mapToRefs(pagesMap), MAX_PAGES_PER_DOMAIN),
+              requests: mergeRefs(requests, mapToRefs(requestsMap), MAX_REQS_PER_DOMAIN),
+            };
         persisted[k] = clean;
         // keep object mirror in sync (also map-free)
         domainStatus[k] = clean;
       }
       payload.domainStatus = persisted;
+      sent.push('domainStatus');
     }
     if (dirty.availableList) {
       payload.availableList = availableList;
+      payload.hasNew = hasNew;
+      sent.push('availableList');
     }
     if (dirty.tabTopUrl) {
       payload.tabTopUrl = tabTopUrl;
+      sent.push('tabTopUrl');
     }
     if (dirty.logs) {
       pruneLogsTTL();
       payload.logs = logsToArray();
       payload.debugEnabled = debugEnabled;
+      sent.push('logs');
     }
-    if (Object.keys(payload).length === 0) {
+    if (!sent.length) {
       return;
-    } // nothing to write
-    await storage.set(payload);
-    dirty.hostSeen =
-      dirty.domainStatus =
-      dirty.availableList =
-      dirty.tabTopUrl =
-      dirty.logs =
-        false;
+    }
+    for (const k of sent) {
+      dirty[k] = false;
+    }
+    try {
+      await storage.set(payload);
+    } catch (e) {
+      for (const k of sent) {
+        dirty[k] = true;
+      }
+      throw e;
+    }
+    if (payload.hostSeen) {
+      lastHostSeenPersist = now;
+      hostSeenNewSincePersist -= newHostsSent;
+    }
   } finally {
     stop();
   }
@@ -959,17 +953,10 @@ async function persist() {
 function persistSoon() {
   const stop = profTic('persistSoon');
   try {
-    // min-spacing 500ms between requests
-    const now = Date.now();
-    if (now - lastPersistRequestedAt < 500 && persistScheduled) {
+    if (persistTimer) {
       return;
     }
-    lastPersistRequestedAt = now;
-    if (persistTimer) {
-      clearTimeout(persistTimer as any);
-    }
     persistTimer = setTimeout(triggerPersist, getPersistDelay()) as any;
-    persistScheduled = true;
   } finally {
     stop();
   }
@@ -982,95 +969,132 @@ async function triggerPersist() {
     persistPending = true;
     return;
   }
-  persistScheduled = false;
   persistInFlight = true;
   try {
     await persist();
+  } catch (e) {
+    log('error', 'persist failed: ' + errToStr(e));
   } finally {
     persistInFlight = false;
     if (persistPending) {
       persistPending = false;
       // schedule a single trailing write
-      persistTimer = setTimeout(triggerPersist, 200) as any;
-      persistScheduled = true;
+      persistTimer ??= setTimeout(triggerPersist, 200) as any;
     }
   }
+}
+
+function whenReady<A extends unknown[]>(fn: (...args: A) => void) {
+  return (...args: A): undefined => {
+    if (initDone) {
+      fn(...args);
+      return undefined;
+    }
+    void ready.then(() => fn(...args));
+    return undefined;
+  };
+}
+
+type MessageHandler = (
+  msg: { type?: string; [k: string]: any },
+  sender: chrome.runtime.MessageSender,
+  sendResponse: (response?: any) => void,
+) => boolean;
+
+function whenReadyForMessages(fn: MessageHandler): MessageHandler {
+  return (msg, sender, sendResponse) => {
+    if (initDone) {
+      return fn(msg, sender, sendResponse);
+    }
+    void ready.then(() => fn(msg, sender, sendResponse));
+    return true;
+  };
 }
 
 // Track top-level page URLs (prefer webNavigation if available)
 if (chrome.webNavigation && chrome.webNavigation.onCommitted) {
-  chrome.webNavigation.onCommitted.addListener((details) => {
-    if (details.tabId >= 0 && details.url && details.url.startsWith('http')) {
-      // Record for the specific frame
-      recordFrameUrl(details.tabId, details.frameId, details.url);
-      // Also mirror to tab-top history if main frame
-      if (details.frameId === 0) {
-        recordTabTop(details.tabId, details.url);
+  chrome.webNavigation.onCommitted.addListener(
+    whenReady((details) => {
+      if (details.tabId >= 0 && details.url && details.url.startsWith('http')) {
+        // Record for the specific frame
+        recordFrameUrl(details.tabId, details.frameId, details.url);
+        // Also mirror to tab-top history if main frame
+        if (details.frameId === 0) {
+          recordTabTop(details.tabId, details.url);
+        }
+        log(
+          'debug',
+          `[signal:webNavigation.onCommitted] tab=${details.tabId} frame=${details.frameId} url=${details.url}`,
+        );
+        persistSoon();
       }
-      log(
-        'debug',
-        `[signal:webNavigation.onCommitted] tab=${details.tabId} frame=${details.frameId} url=${details.url}`,
-      );
-      persistSoon();
-    }
-  });
+    }),
+  );
 }
 
 // Track SPA route changes and hash changes for all frames
 if (chrome.webNavigation && chrome.webNavigation.onHistoryStateUpdated) {
-  chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
-    if (details.tabId >= 0 && details.url && details.url.startsWith('http')) {
-      recordFrameUrl(details.tabId, details.frameId, details.url);
-      if (details.frameId === 0) {
-        recordTabTop(details.tabId, details.url);
+  chrome.webNavigation.onHistoryStateUpdated.addListener(
+    whenReady((details) => {
+      if (details.tabId >= 0 && details.url && details.url.startsWith('http')) {
+        recordFrameUrl(details.tabId, details.frameId, details.url);
+        if (details.frameId === 0) {
+          recordTabTop(details.tabId, details.url);
+        }
+        log(
+          'debug',
+          `[signal:webNavigation.onHistoryStateUpdated] tab=${details.tabId} frame=${details.frameId} url=${details.url}`,
+        );
+        persistSoon();
       }
-      log(
-        'debug',
-        `[signal:webNavigation.onHistoryStateUpdated] tab=${details.tabId} frame=${details.frameId} url=${details.url}`,
-      );
-      persistSoon();
-    }
-  });
+    }),
+  );
 }
 
 if (chrome.webNavigation && chrome.webNavigation.onReferenceFragmentUpdated) {
-  chrome.webNavigation.onReferenceFragmentUpdated.addListener((details) => {
-    if (details.tabId >= 0 && details.url && details.url.startsWith('http')) {
-      recordFrameUrl(details.tabId, details.frameId, details.url);
-      if (details.frameId === 0) {
-        recordTabTop(details.tabId, details.url);
+  chrome.webNavigation.onReferenceFragmentUpdated.addListener(
+    whenReady((details) => {
+      if (details.tabId >= 0 && details.url && details.url.startsWith('http')) {
+        recordFrameUrl(details.tabId, details.frameId, details.url);
+        if (details.frameId === 0) {
+          recordTabTop(details.tabId, details.url);
+        }
+        log(
+          'debug',
+          `[signal:webNavigation.onReferenceFragmentUpdated] tab=${details.tabId} frame=${details.frameId} url=${details.url}`,
+        );
+        persistSoon();
       }
-      log(
-        'debug',
-        `[signal:webNavigation.onReferenceFragmentUpdated] tab=${details.tabId} frame=${details.frameId} url=${details.url}`,
-      );
-      persistSoon();
-    }
-  });
+    }),
+  );
 }
 
 // Fallback: tabs.onUpdated always exists
-chrome.tabs.onUpdated.addListener((tabId: number, changeInfo: { url?: string }) => {
-  if (changeInfo.url && /^https?:\/\//.test(changeInfo.url)) {
-    recordTabTop(tabId, changeInfo.url);
-    log('debug', `[signal:tabs.onUpdated] tab=${tabId} url=${changeInfo.url}`);
-    persistSoon();
-  }
-});
-
-chrome.tabs.onRemoved.addListener((tabId: number) => {
-  delete tabTopUrl[tabId];
-  // Clear all frame histories for this tab
-  Object.keys(frameHistory).forEach((k) => {
-    if (k.startsWith(`${tabId}:`)) {
-      delete frameHistory[k];
+chrome.tabs.onUpdated.addListener(
+  whenReady((tabId: number, changeInfo: { url?: string }) => {
+    if (changeInfo.url && /^https?:\/\//.test(changeInfo.url)) {
+      recordTabTop(tabId, changeInfo.url);
+      log('debug', `[signal:tabs.onUpdated] tab=${tabId} url=${changeInfo.url}`);
+      persistSoon();
     }
-  });
-  delete tabHistory[tabId];
-  dirty.tabTopUrl = true;
-  log('debug', `[signal:tabs.onRemoved] tab=${tabId}`);
-  persistSoon();
-});
+  }),
+);
+
+chrome.tabs.onRemoved.addListener(
+  whenReady((tabId: number) => {
+    delete tabTopUrl[tabId];
+    // Clear all frame histories for this tab
+    Object.keys(frameHistory).forEach((k) => {
+      if (k.startsWith(`${tabId}:`)) {
+        delete frameHistory[k];
+      }
+    });
+    delete tabHistory[tabId];
+    dirty.tabTopUrl = true;
+    log('debug', `[signal:tabs.onRemoved] tab=${tabId}`);
+    persistSoon();
+  }),
+);
 
 // RDAP
 async function rdapFetch(domain: string) {
@@ -1206,30 +1230,14 @@ async function dnsFallback(registrable: string) {
   const stop = profTic('dnsFallback');
   try {
     log('debug', `[doh] fallback registrable=${registrable}`);
-    const cands = [registrable]; // no subdomain looping
-
-    // Cache check
-    const cs = domainStatus[registrable];
-    if (cs && (cs.status === 'registered' || cs.status === 'unregistered')) {
-      log('debug', `[doh] cache-hit ${registrable} -> ${cs.status}`);
-      return {
-        result: { status: cs.status, method: cs.method, http: cs.http ?? 0, url: cs.url ?? '' },
-        cands,
-      };
-    }
-
-    // Single DNS check at registrable
     const res = await dnsCheckOne(registrable);
     log('debug', `[doh] checked ${registrable} -> ${res.status}`);
     return {
-      result: {
-        status: res.status,
-        method: res.method,
-        http: 0,
-        url: '',
-        ...((res as any).softUntil ? { softUntil: (res as any).softUntil } : {}),
-      },
-      cands,
+      status: res.status,
+      method: res.method,
+      http: 0,
+      url: '',
+      ...((res as any).softUntil ? { softUntil: (res as any).softUntil } : {}),
     };
   } finally {
     stop();
@@ -1242,7 +1250,12 @@ function addPageContext(domain: string, pageUrl?: string | null) {
     if (!pageUrl) {
       return;
     }
-    const item: DomainInfo = dsGet(domain) ?? {
+    const existing = dsGet(domain);
+    if (isSettledRegistered(existing)) {
+      dsSet(domain, existing);
+      return;
+    }
+    const item: DomainInfo = existing ?? {
       status: 'pending',
       method: null,
       http: 0,
@@ -1282,7 +1295,12 @@ function addRequestContext(domain: string, reqUrl?: string | null) {
     if (!reqUrl) {
       return;
     }
-    const item: DomainInfo = dsGet(domain) ?? {
+    const existing = dsGet(domain);
+    if (isSettledRegistered(existing)) {
+      dsSet(domain, existing);
+      return;
+    }
+    const item: DomainInfo = existing ?? {
       status: 'pending',
       method: null,
       http: 0,
@@ -1316,105 +1334,37 @@ function addRequestContext(domain: string, reqUrl?: string | null) {
   }
 }
 
-function mergeContextsInto(cands: string[], into: DomainInfo) {
+function mergeContextsInto(domain: string, into: DomainInfo) {
   const stop = profTic('mergeContextsInto');
   try {
-    if (cands.length === 1) {
-      const ds = dsGet(cands[0]!) || null;
-      if (ds) {
-        // Prefer maps (live, in-memory). Fall back to arrays if present.
-        const pageEntries: [string, number][] = ds.pagesMap
-          ? Array.from(ds.pagesMap.entries())
-          : (ds.pages ?? []).map((p) => [p.url, p.ts]);
-        const reqEntries: [string, number][] = ds.requestsMap
-          ? Array.from(ds.requestsMap.entries())
-          : (ds.requests ?? []).map((r) => [r.url, r.ts]);
-
-        into.pages = pageEntries
-          .map(([url, ts]) => ({ url, ts }))
-          .sort((a, b) => b.ts - a.ts)
-          .slice(0, MAX_PAGES_PER_DOMAIN);
-        into.requests = reqEntries
-          .map(([url, ts]) => ({ url, ts }))
-          .sort((a, b) => b.ts - a.ts)
-          .slice(0, MAX_REQS_PER_DOMAIN);
-      } else {
-        into.pages = [];
-        into.requests = [];
-      }
-      return;
-    }
-    const pages = new Map<string, number>();
-    const reqs = new Map<string, number>();
-    for (const cand of cands) {
-      const ds = dsGet(cand);
-      if (!ds) {
-        continue;
-      }
-      if (ds.pagesMap) {
-        for (const [u, t] of ds.pagesMap) {
-          pages.set(u, Math.max(pages.get(u) || 0, t));
-        }
-      }
-      if (ds.pages) {
-        for (const p of ds.pages) {
-          pages.set(p.url, Math.max(pages.get(p.url) || 0, p.ts));
-        }
-      }
-      if (ds.requestsMap) {
-        for (const [u, t] of ds.requestsMap) {
-          reqs.set(u, Math.max(reqs.get(u) || 0, t));
-        }
-      }
-      if (ds.requests) {
-        for (const r of ds.requests) {
-          reqs.set(r.url, Math.max(reqs.get(r.url) || 0, r.ts));
-        }
-      }
-    }
-    const mergedPages = Array.from(pages.entries())
-      .map(([url, ts]) => ({ url, ts }))
-      .sort((a, b) => b.ts - a.ts)
-      .slice(0, MAX_PAGES_PER_DOMAIN);
-    const mergedReqs = Array.from(reqs.entries())
-      .map(([url, ts]) => ({ url, ts }))
-      .sort((a, b) => b.ts - a.ts)
-      .slice(0, MAX_REQS_PER_DOMAIN);
-    into.pages = mergedPages;
-    into.requests = mergedReqs;
+    const ds = dsGet(domain);
+    into.pages = mergeRefs(ds?.pages, mapToRefs(ds?.pagesMap), MAX_PAGES_PER_DOMAIN);
+    into.requests = mergeRefs(ds?.requests, mapToRefs(ds?.requestsMap), MAX_REQS_PER_DOMAIN);
   } finally {
     stop();
   }
 }
 
-function propagateStatus(cands: string[], result: DomainInfo) {
+function propagateStatus(domain: string, result: DomainInfo) {
   const stop = profTic('propagateStatus');
 
   try {
     const ts = Date.now();
-    mergeContextsInto(cands, result);
+    if (!isSettledRegistered(result)) {
+      mergeContextsInto(domain, result);
+    }
 
-    for (const cand of cands) {
-      const prev = dsGet(cand);
-      const wasResolved = !!prev && prev.status !== 'pending' && prev.status !== 'unknown';
-      const next: DomainInfo = {
-        ...result,
-        ts,
-        ...(result.pages ? { pages: result.pages } : {}),
-        ...(result.requests ? { requests: result.requests } : {}),
-      };
-      dsSet(cand, next);
-      const isResolved = next.status !== 'pending' && next.status !== 'unknown';
-      if (!wasResolved && isResolved) {
-        cacheResolvedCount++;
-      }
+    const prev = dsGet(domain);
+    const next: DomainInfo = { ...result, ts };
+    dsSet(domain, next);
+    if (!(prev && isResolved(prev)) && isResolved(next)) {
+      cacheResolvedCount++;
     }
     dirty.domainStatus = true;
 
-    const shortest = cands[0]!; // registrable
     if (result.status === 'unregistered') {
       upsertAvailable({
-        domain: shortest,
+        domain,
         method: result.method ?? null,
         ts,
         ...(result.pages ? { pages: result.pages } : {}),
@@ -1423,8 +1373,11 @@ function propagateStatus(cands: string[], result: DomainInfo) {
       hasNew = true;
       log(
         'debug',
-        `[availableList] upsert ${shortest} pages=${result.pages?.length ?? 0} reqs=${result.requests?.length ?? 0}`,
+        `[availableList] upsert ${domain} pages=${result.pages?.length ?? 0} reqs=${result.requests?.length ?? 0}`,
       );
+      persistSoon();
+    } else if (isSettledRegistered(result) && removeAvailable(domain)) {
+      log('debug', `[availableList] remove ${domain} (now registered)`);
       persistSoon();
     }
   } finally {
@@ -1432,7 +1385,7 @@ function propagateStatus(cands: string[], result: DomainInfo) {
   }
 }
 
-function ensureEnqueued(regDomain: string, origHost: string, source: string) {
+function ensureEnqueued(regDomain: string, source: string) {
   const stop = profTic('ensureEnqueued');
   try {
     const t = Date.now();
@@ -1473,7 +1426,6 @@ function ensureEnqueued(regDomain: string, origHost: string, source: string) {
       return;
     }
 
-    itemToHost.set(regDomain, origHost);
     queue.push(regDomain);
     queued.add(regDomain);
     lastQueued.set(regDomain, t);
@@ -1490,6 +1442,23 @@ function ensureEnqueued(regDomain: string, origHost: string, source: string) {
   }
 }
 
+async function commitDnsVerdict(registrable: string, reason: string) {
+  try {
+    const result = await dnsFallback(registrable);
+    if (result.status === 'registered' || result.status === 'unregistered') {
+      propagateStatus(registrable, { ...result, ts: Date.now() });
+      log('debug', `[check] ${registrable} -> ${result.status} (dns fallback after ${reason})`);
+      return;
+    }
+    log('warn', `[check] ${registrable} ${reason}; DNS inconclusive -> retry when seen again`);
+  } catch (e) {
+    log(
+      'warn',
+      `[check] ${registrable} ${reason}; DNS fallback failed: ${errToStr(e)} -> retry when seen again`,
+    );
+  }
+}
+
 async function checkRegistrable(registrable: string) {
   const stop = profTic('checkRegistrable');
   try {
@@ -1502,105 +1471,49 @@ async function checkRegistrable(registrable: string) {
       const resp = await rdapFetch(registrable);
 
       if (resp.ok && resp.status === 200) {
-        const cands = [registrable];
-        const result: DomainInfo = {
+        propagateStatus(registrable, {
           status: 'registered',
           method: 'rdap',
           http: 200,
           url: resp.finalUrl,
           ts: Date.now(),
-        };
-        propagateStatus(cands, result);
+        });
         log('debug', `[check] ${registrable} -> registered (rdap 200)`);
         return;
       }
 
       if (!resp.ok && resp.status === 404) {
-        const cands = [registrable];
         // If rdap.org redirected us to an authoritative RDAP endpoint,
         // a 404 there is strong evidence of "unregistered".
         const redirectedOffAggregator = !resp.finalUrl.startsWith('https://rdap.org/');
         if (redirectedOffAggregator) {
-          const result: DomainInfo = {
+          propagateStatus(registrable, {
             status: 'unregistered',
             method: 'rdap',
             http: 404,
             url: resp.finalUrl,
             ts: Date.now(),
-          };
-          propagateStatus(cands, result);
+          });
           log('debug', `[check] ${registrable} -> unregistered (rdap 404 via redirect)`);
           return;
         }
         // Otherwise confirm with DNS before committing.
-        try {
-          const { result } = await dnsFallback(registrable);
-          if (result.status === 'registered' || result.status === 'unregistered') {
-            propagateStatus(cands, {
-              ...result,
-              http: result.http ?? 0,
-              url: result.url ?? '',
-              ts: Date.now(),
-            });
-            log(
-              'debug',
-              `[check] ${registrable} -> ${result.status} (dns fallback after rdap 404 on aggregator)`,
-            );
-            return;
-          }
-        } catch {}
-        log(
-          'warn',
-          `[check] ${registrable} rdap 404 on aggregator; DNS inconclusive -> DROP domain (no re-enqueue)`,
-        );
-        hardDropDomain(registrable);
+        await commitDnsVerdict(registrable, 'rdap 404 on aggregator');
         return;
       }
 
       if (!resp.ok && resp.status === 0) {
-        const cands = [registrable];
-
-        // Try DNS as a best-effort fallback first
-        try {
-          const { result } = await dnsFallback(registrable);
-          if (result.status === 'registered' || result.status === 'unregistered') {
-            // We got a definitive answer from DNS - commit it.
-            propagateStatus(cands, {
-              ...result,
-              http: result.http ?? 0,
-              url: result.url ?? '',
-              ts: Date.now(),
-            });
-            log(
-              'debug',
-              `[check] ${registrable} -> ${result.status} (dns fallback after rdap network failure)`,
-            );
-          } else {
-            log(
-              'warn',
-              `[check] ${registrable} rdap network failure; DNS inconclusive -> DROP domain (no re-enqueue)`,
-            );
-            hardDropDomain(registrable);
-          }
-        } catch (e) {
-          log(
-            'warn',
-            `[check] ${registrable} rdap network failure and dns fallback failed: ${errToStr(e)} -> DROP domain (no re-enqueue)`,
-          );
-          hardDropDomain(registrable);
-        }
+        await commitDnsVerdict(registrable, 'rdap network failure');
         return;
       }
 
-      const cands = [registrable];
-      const result: DomainInfo = {
+      propagateStatus(registrable, {
         status: 'error',
         method: 'rdap',
         http: resp.status,
         url: resp.finalUrl,
         ts: Date.now(),
-      };
-      propagateStatus(cands, result);
+      });
       log('debug', `[check] ${registrable} -> error http=${resp.status}`);
     })().finally(() => inflightByDomain.delete(registrable));
     inflightByDomain.set(registrable, p);
@@ -1628,7 +1541,6 @@ async function processQueue() {
         persistLogsSoon();
       } finally {
         active.delete(item);
-        itemToHost.delete(item);
         inflight = Math.max(0, inflight - 1);
         if (queue.length) {
           setTimeout(() => {
@@ -1645,20 +1557,29 @@ async function processQueue() {
   }
 }
 
+function seenRecently(requestId: string | undefined, url: string | undefined) {
+  if (!requestId) {
+    return false;
+  }
+  const key = `${requestId}|${url ?? ''}`;
+  const t = Date.now();
+  const prev = seenRequestIds.get(key);
+  if (prev && t - prev < REQ_TTL_MS) {
+    return true;
+  }
+  seenRequestIds.set(key, t);
+  seenReqQueue.push({ key, ts: t });
+  return false;
+}
+
 // onBeforeRequest: see URLs even if blocked by extensions
 chrome.webRequest.onBeforeRequest.addListener(
-  (details) => {
+  whenReady((details) => {
     const { url: requestUrl, tabId, requestId, frameId } = details as any;
 
-    if (requestId) {
-      const t = Date.now();
-      const prev = seenRequestIds.get(requestId);
-      if (prev && t - prev < REQ_TTL_MS) {
-        log('debug', `[signal:beforeRequest] skip-dup rid=${requestId} url=${requestUrl}`);
-        return;
-      }
-      seenRequestIds.set(requestId, t);
-      seenReqQueue.push({ key: requestId, ts: t });
+    if (seenRecently(requestId, requestUrl)) {
+      log('debug', `[signal:beforeRequest] skip-dup rid=${requestId} url=${requestUrl}`);
+      return;
     }
 
     if (
@@ -1718,43 +1639,24 @@ chrome.webRequest.onBeforeRequest.addListener(
       }
       addRequestContext(registrable, requestUrl);
 
-      if (!domainStatus[registrable]) {
-        domainStatus[registrable] = {
-          status: 'pending',
-          method: null,
-          http: 0,
-          url: '',
-          ts: Date.now(),
-          pages: [],
-          requests: [],
-        };
-        log('debug', `[state] set pending ${registrable}`);
-      }
-
-      ensureEnqueued(registrable, host, 'beforeRequest');
+      ensureEnqueued(registrable, 'beforeRequest');
     } catch (e) {
       log('error', 'onBeforeRequest handler failed: ' + errToStr(e));
       persistLogsSoon();
     }
     return undefined;
-  },
+  }),
   { urls: ['http://*/*', 'https://*/*'] },
 );
 
 // onErrorOccurred: log canceled/blocked (privacy/CSP/etc.), enqueue
 chrome.webRequest.onErrorOccurred.addListener(
-  (details) => {
+  whenReady((details) => {
     const { tabId, requestId, frameId } = details as any;
 
-    if (requestId) {
-      const t = Date.now();
-      const prev = seenRequestIds.get(requestId);
-      if (prev && t - prev < REQ_TTL_MS) {
-        log('debug', `[signal:errorOccurred] skip-dup rid=${requestId} url=${details.url}`);
-        return;
-      }
-      seenRequestIds.set(requestId, t);
-      seenReqQueue.push({ key: requestId, ts: t });
+    if (seenRecently(requestId, details.url)) {
+      log('debug', `[signal:errorOccurred] skip-dup rid=${requestId} url=${details.url}`);
+      return;
     }
 
     if (!details?.url) {
@@ -1802,37 +1704,23 @@ chrome.webRequest.onErrorOccurred.addListener(
         addPageContext(registrable, pageUrl);
       }
       addRequestContext(registrable, requestUrl);
-
-      if (!domainStatus[registrable]) {
-        domainStatus[registrable] = {
-          status: 'pending',
-          method: null,
-          http: 0,
-          url: '',
-          ts: Date.now(),
-          pages: [],
-          requests: [],
-        };
-        log('debug', `[state] set pending ${registrable}`);
-      }
-      ensureEnqueued(registrable, host, 'errorOccurred');
+      ensureEnqueued(registrable, 'errorOccurred');
     } catch (e) {
       log('error', 'onErrorOccurred handler failed: ' + errToStr(e));
       persistLogsSoon();
     }
-  },
+  }),
   { urls: ['http://*/*', 'https://*/*'] },
 );
 
 // Messages
 chrome.runtime.onMessage.addListener(
-  (
-    msg: { type?: string; [k: string]: any },
-    sender: chrome.runtime.MessageSender,
-    sendResponse: (response?: any) => void,
-  ) => {
+  whenReadyForMessages((msg, sender, sendResponse) => {
     if (msg?.type === 'ackNew') {
       hasNew = false;
+      void storage
+        .set({ hasNew })
+        .catch((e) => log('error', 'ackNew storage.set failed: ' + errToStr(e)));
       updateBadgeSoon();
       sendResponse({ ok: true });
       return true;
@@ -1881,25 +1769,12 @@ chrome.runtime.onMessage.addListener(
       queue.clear();
       hasNew = false;
       updateBadgeSoon();
-      try {
-        (active as any).clear?.();
-      } catch (e) {
-        log('error', 'clearCache active.clear failed: ' + errToStr(e));
-        persistLogsSoon();
-      }
+      active.clear();
       lastQueued.clear();
       queued.clear();
-      try {
-        (itemToHost as any).clear?.();
-      } catch (e) {
-        log('error', 'clearCache itemToHost.clear failed: ' + errToStr(e));
-        persistLogsSoon();
-      }
-      try {
-        tldCache.clear();
-      } catch {}
+      tldCache.clear();
       void storage
-        .set({ hostSeen, domainStatus })
+        .set({ hostSeen, domainStatus, hasNew })
         .catch((e) => log('error', 'clearCache storage.set failed: ' + errToStr(e)));
       void persist()
         .then(() => {
@@ -1914,10 +1789,11 @@ chrome.runtime.onMessage.addListener(
 
     if (msg?.type === 'clearAvailable') {
       availableList = [];
+      availableIdx.clear();
       hasNew = false;
       updateBadgeSoon();
       void storage
-        .set({ availableList })
+        .set({ availableList, hasNew })
         .then(() => {
           updateBadgeSoon();
         })
@@ -1959,60 +1835,21 @@ chrome.runtime.onMessage.addListener(
           }
         }
 
-        // Derive blocked host when possible (http/https or blob:https://...).
         let blockedHost: string | null = null;
         if (/^https?:/i.test(raw)) {
           try {
             blockedHost = normalizeHost(new URL(raw).hostname);
           } catch {}
-        } else if (raw.startsWith('blob:')) {
-          const inner = raw.slice(5);
-          try {
-            blockedHost = normalizeHost(new URL(inner).hostname);
-          } catch {}
         }
-
-        // Prefer attributing to the page's registrable; fall back to blocked host.
-        let registrable: string | null = null;
-        try {
-          if (pageUrl) {
-            const ph = normalizeHost(new URL(pageUrl).hostname);
-            const info = ph ? parseHostCached(ph) : ({} as any);
-            if (info.domain && info.isIcann && !info.isIp) {
-              registrable = info.domain;
-            }
-          }
-        } catch {}
-        if (!registrable && blockedHost) {
-          const info = parseHostCached(blockedHost);
-          if (info.domain && info.isIcann && !info.isIp) {
-            registrable = info.domain;
-          }
-        }
+        const info = blockedHost ? parseHostCached(blockedHost) : null;
+        const registrable = info?.domain && info.isIcann && !info.isIp ? info.domain : null;
 
         if (registrable) {
-          // Context: record page; only record request if it's a real http(s) URL.
           if (pageUrl) {
             addPageContext(registrable, pageUrl);
           }
-          if (blockedHost && /^https?:/i.test(raw)) {
-            addRequestContext(registrable, raw);
-          }
-
-          if (!domainStatus[registrable]) {
-            domainStatus[registrable] = {
-              status: 'pending',
-              method: null,
-              http: 0,
-              url: '',
-              ts: Date.now(),
-              pages: [],
-              requests: [],
-            };
-            log('debug', `[state] set pending ${registrable}`);
-          }
-          // Keep queue/active semantics consistent with other signals.
-          ensureEnqueued(registrable, blockedHost || registrable, 'cspViolation');
+          addRequestContext(registrable, raw);
+          ensureEnqueued(registrable, 'cspViolation');
         } else {
           log(
             'debug',
@@ -2033,21 +1870,21 @@ chrome.runtime.onMessage.addListener(
       const registrable = info && info.domain && info.isIcann && !info.isIp ? info.domain : null;
       if (registrable) {
         const prev = dsGet(registrable);
-        if (prev && prev.status !== 'pending' && prev.status !== 'unknown') {
+        if (prev && isResolved(prev)) {
           cacheResolvedCount = Math.max(0, cacheResolvedCount - 1);
         }
         dsDelete(registrable);
         lastQueued.delete(registrable);
-        const hostHint = itemToHost.get(registrable) || host || registrable;
-        ensureEnqueued(registrable, hostHint, 'recheck');
-        sendResponse({ ok: true });
+        ensureEnqueued(registrable, 'recheck');
+        const done = () => sendResponse({ ok: true });
+        void Promise.resolve(inflightByDomain.get(registrable)).then(done, done);
       } else {
         sendResponse({ ok: false });
       }
       return true;
     }
     return false;
-  },
+  }),
 );
 
 async function init() {
@@ -2058,6 +1895,7 @@ async function init() {
     'tabTopUrl',
     'logs',
     'debugEnabled',
+    'hasNew',
   ]);
   hostSeen = s.hostSeen || {};
   domainStatus = s.domainStatus || {};
@@ -2068,6 +1906,10 @@ async function init() {
       if (ds && typeof ds === 'object') {
         delete (ds as any).pagesMap;
         delete (ds as any).requestsMap;
+        if (isSettledRegistered(ds)) {
+          delete ds.pages;
+          delete ds.requests;
+        }
       }
     }
   } catch {}
@@ -2096,8 +1938,16 @@ async function init() {
   }
   pruneLogsTTL();
   debugEnabled = !!s.debugEnabled;
+  hasNew = !!s.hasNew;
+  cacheResolvedCount = 0;
+  for (const [domain, ds] of domainStatusMem) {
+    if (isResolved(ds)) {
+      cacheResolvedCount++;
+    } else if (ds.status === 'pending') {
+      ensureEnqueued(domain, 'init');
+    }
+  }
   updateBadge();
-  void processQueue();
 }
 
 function ensureQueueAlarm() {
@@ -2132,4 +1982,10 @@ if (isMV3 && alarmsApi) {
   }
 }
 
-void init();
+const ready = init()
+  .catch((e) => {
+    log('error', 'init failed: ' + errToStr(e));
+  })
+  .finally(() => {
+    initDone = true;
+  });

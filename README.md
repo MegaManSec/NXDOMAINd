@@ -26,6 +26,7 @@ The best part? One codebase, two builds!
 - Monitors all network requests, and extracts all connected-to ICANN-only **domain** (using the [PSL](https://publicsuffix.org/) with [tldts](https://www.npmjs.com/package/tldts)).
 - Uses either **RDAP** or **DNS-over-HTTPS** to check if the domain is actually registered, or it's an unregistered, dangling domain.
 - Records the **page URL** (where the request was initiated from) and the **full request URL** (where the request was supposed to be made to).
+- Listens for CSP violations too, since requests blocked by a page's CSP never reach `webRequest`.
 - The extension badge turns **red** on new finding; **blue** when idle; and **yellow** while checking new domains.
 
 The idea is that there some websites attempting to load resources from external domains which no longer exist. You can register them, and take advantage of how the external resource is being loaded.
@@ -73,7 +74,7 @@ Edit `src/background.ts`:
 - `MAX_PAGES_PER_DOMAIN` – cap for "Pages observed on” per domain (most recent kept).
 - `MAX_REQS_PER_DOMAIN` – cap for "Requests made to this domain” (most recent kept).
 - `REQ_GC_WINDOW_MS` – GC horizon for `seenRequestIds`/`lastQueued`.
-- `REQ_TTL_MS` – de-dupe window for identical `requestId` events.
+- `REQ_TTL_MS` – de-dupe window for repeated events with the same `requestId` and URL.
 - `MAX_CONCURRENCY` – parallel RDAP/DNS checks.
 - `ENQUEUE_TTL_MS` – per-domain re-enqueue throttle.
 - `TAB_HISTORY_TTL_MS` – keep per-tab full-URL history this long (to recover paths when only origin is provided).
@@ -83,4 +84,4 @@ Edit `src/background.ts`:
 
 ## TODO
 
-Cleanup, document proper tunings, and fix CSP.
+Cleanup, and document proper tunings.

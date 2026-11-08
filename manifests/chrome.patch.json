@@ -4,6 +4,6 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "permissions": ["storage", "tabs", "webNavigation", "webRequest", "unlimitedStorage"],
+  "permissions": ["storage", "tabs", "webNavigation", "webRequest", "unlimitedStorage", "alarms"],
   "host_permissions": ["<all_urls>"]
 }
