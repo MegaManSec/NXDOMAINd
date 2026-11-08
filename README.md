@@ -33,10 +33,8 @@ The idea is that there some websites attempting to load resources from external 
 
 ## Download
 
-Packed Chrome and Firefox extensions can be downloaded from the [releases](https://github.com/MegaManSec/NXDOMAIND/releases) page.
-
-- Firefox: download the file, and enable it.
-- Chrome: open [chrome://extensions/](chrome://extensions/), and drag the `.zip` file into your browser to import it.
+- Firefox: install it from [addons.mozilla.org](https://addons.mozilla.org/firefox/search/?q=NXDomain%27d). Versions up to 1.1.0 are on the [releases](https://github.com/MegaManSec/NXDOMAIND/releases) page.
+- Chrome: download the `.zip` from the [releases](https://github.com/MegaManSec/NXDOMAIND/releases) page, open [chrome://extensions/](chrome://extensions/), and drag the `.zip` file into your browser to import it.
 
 ## Build
 
