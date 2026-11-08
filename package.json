@@ -17,7 +17,7 @@
     "dev:chrome": "web-ext run --target=chromium --source-dir=dist/chrome",
     "dev:firefox": "web-ext run --source-dir=dist/firefox",
     "package:source": "mkdir -p artifacts/firefox && git archive --format=zip --output=artifacts/firefox/source.zip HEAD",
-    "sign:firefox": "web-ext sign --source-dir=dist/firefox --artifacts-dir=artifacts/firefox --channel=listed --amo-metadata=store/amo-metadata.json --upload-source-code=artifacts/firefox/source.zip --approval-timeout=0",
+    "sign:firefox": "web-ext sign --source-dir=dist/firefox --artifacts-dir=artifacts/firefox --channel=listed --amo-metadata=store/amo-metadata.json --upload-source-code=artifacts/firefox/source.zip --approval-timeout=1800000",
     "clean": "rimraf dist"
   },
   "repository": {
