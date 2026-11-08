@@ -33,7 +33,7 @@ The idea is that there some websites attempting to load resources from external 
 
 ## Download
 
-- Firefox: install it from [addons.mozilla.org](https://addons.mozilla.org/firefox/search/?q=NXDomain%27d). Releases also carry the Mozilla-signed `.xpi` when Mozilla signs it in time.
+- Firefox: install it from [addons.mozilla.org](https://addons.mozilla.org/firefox/search/?q=NXDomain%27d). Releases also carry the Mozilla-signed `.xpi`, or an `.unsigned.xpi` if Mozilla hadn't signed it in time, which Firefox only installs in Developer Edition or Nightly.
 - Chrome: download the `.zip` from the [releases](https://github.com/MegaManSec/NXDOMAIND/releases) page, open [chrome://extensions/](chrome://extensions/), and drag the `.zip` file into your browser to import it.
 
 ## Build

@@ -63,7 +63,17 @@ jobs:
           pnpm run package:source
           if ! pnpm run sign:firefox 2>&1 | tee "$RUNNER_TEMP/web-ext.log"; then
             grep -q 'Approval: timeout exceeded' "$RUNNER_TEMP/web-ext.log" || exit 1
-            echo "::warning::Mozilla didn't sign it within 30 minutes, so the GitHub Release won't include the xpi."
+            echo "::warning::Mozilla didn't sign it within 30 minutes, so the GitHub Release gets an unsigned xpi."
+          fi
+
+      - name: Pick the signed xpi, or an unsigned one if Mozilla hasn't signed it yet
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          signed=$(ls artifacts/firefox/*.xpi 2>/dev/null | head -n 1)
+          if [ -n "$signed" ]; then
+            mv "$signed" artifacts/firefox/nxdomain-watcher-firefox.xpi
+          else
+            (cd dist/firefox && zip -qr ../../artifacts/firefox/nxdomain-watcher-firefox.unsigned.xpi .)
           fi
 
       # ---------- Upload CI artifacts (ephemeral) ----------
