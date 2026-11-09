@@ -27,8 +27,8 @@ interface DomainInfo {
 const HOST_SEEN_BUMP_MS = 5_000;
 const DNS_REGISTERED_SOFT_TTL_MS = 15 * 60_000;
 
-const MAX_DOMAINS = 1_000_000; // Total maximum *domains* (eTLD+1, domain.com) kept in the cache.
-const MAX_HOSTS = 1_000_000; // Total maximum *hosts* (subdomain.domain.com) kept in the cache.
+const MAX_DOMAINS = 50_000; // Total maximum *domains* (eTLD+1, domain.com) kept in the cache.
+const MAX_HOSTS = 100_000; // Total maximum *hosts* (subdomain.domain.com) kept in the cache.
 const MAX_PAGES_PER_DOMAIN = 200; // Total maximum "Pages observed on:" (https://html-viewer.com/)
 const MAX_REQS_PER_DOMAIN = 200; // Total maximum "Requests made to this domain:" (https://example.com/page1, https://example.com/page2)
 const MAX_URLS_PER_DOMAIN_MAP = 5000; // Cap live per-domain in-memory URL maps (pagesMap/requestsMap)

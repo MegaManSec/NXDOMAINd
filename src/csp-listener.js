@@ -2,6 +2,9 @@
   document.addEventListener(
     'securitypolicyviolation',
     (e) => {
+      if (!e.isTrusted) {
+        return;
+      }
       try {
         chrome.runtime.sendMessage(
           {
