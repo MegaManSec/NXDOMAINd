@@ -1,9 +1,9 @@
 # NXDOMAIN'd
 
-| Browser                                                                                                                               | Install from                                                                                        |
-| ------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| <img src="https://cdn.jsdelivr.net/gh/alrra/browser-logos@75.0.1/src/firefox/firefox_64x64.png" width="32" height="32" alt="Firefox"> | Firefox Add-ons (in review)                                                                         |
-| <img src="https://cdn.jsdelivr.net/gh/alrra/browser-logos@75.0.1/src/chrome/chrome_64x64.png" width="32" height="32" alt="Chrome">    | [GitHub Releases](../../releases/latest), loaded unpacked (see [Other downloads](#other-downloads)) |
+| Browser                                                                                                                                                                                                 | Install from                                                                                        |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| <a href="https://addons.mozilla.org/firefox/addon/nxdomaind/"><img src="https://cdn.jsdelivr.net/gh/alrra/browser-logos@75.0.1/src/firefox/firefox_64x64.png" width="32" height="32" alt="Firefox"></a> | [Firefox Add-ons](https://addons.mozilla.org/firefox/addon/nxdomaind/)                              |
+| <img src="https://cdn.jsdelivr.net/gh/alrra/browser-logos@75.0.1/src/chrome/chrome_64x64.png" width="32" height="32" alt="Chrome">                                                                      | [GitHub Releases](../../releases/latest), loaded unpacked (see [Other downloads](#other-downloads)) |
 
 **Discover dangling unregistered domains while browsing the web.**
 
